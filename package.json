@@ -1,0 +1,19 @@
+{
+    "name": "partbot",
+    "version": "1.0.0",
+    "description": "PartBot - Bot WhatsApp autopartes",
+    "main": "partbot.js",
+    "scripts": {
+        "start": "node partbot.js"
+    },
+    "dependencies": {
+        "@whiskeysockets/baileys": "^6.7.5",
+        "@hapi/boom": "^10.0.1",
+        "qrcode": "^1.5.3",
+        "pino": "^8.19.0",
+        "mysql2": "^3.9.2"
+    },
+    "engines": {
+        "node": ">=18.0.0"
+    }
+}
