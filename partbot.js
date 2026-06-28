@@ -9,11 +9,12 @@ const mysql = require('mysql2/promise');
 
 // ===== CONFIGURACIÓN =====
 const PORT = process.env.PORT || 10161;
-const TIENDA_ID = parseInt(process.env.TIENDA_ID) || 161;
 const DB_HOST = process.env.DB_HOST || 'one4cars.com';
 const DB_USER = process.env.DB_USER || 'juant200_one4car';
 const DB_PASS = process.env.DB_PASS || 'Notieneclave1*';
 const DB_NAME = process.env.DB_NAME || 'juant200_bot_clientes';
+let TIENDA_ID = 0;
+let tiendaInfo = null;
 
 process.on('unhandledRejection', (err) => {
     console.log("[PARTBOT] Error no capturado:", err?.message || err);
@@ -37,8 +38,8 @@ const clientNames = new Map();
 
 let qrCodeData = "Iniciando...";
 let socketBot = null;
-let tiendaInfo = null;
 
+// ===== FUNCIONES DE APOYO =====
 function normalizar(texto) {
     return texto.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?!]/g, "").toLowerCase().trim();
 }
@@ -69,6 +70,7 @@ function isBotReady() {
     return socketBot && socketBot.user && socketBot.user.id;
 }
 
+// ===== MENSAJES DEL BOT =====
 const MENU_TEXT = `🎯 *REPUESTOS JJ GARCIA, C.A* 🚗
 
 1️⃣ *Buscar productos*
@@ -96,16 +98,47 @@ const DESPEDIDAS = [
     `¡De nada! Recuerde que *REPUESTOS JJ GARCIA, C.A* está a la orden para lo que necesite. 🚗`
 ];
 
-async function cargarTienda() {
+async function detectarTienda(hostname) {
+    if (TIENDA_ID) return;
     try {
-        const [rows] = await pool.execute("SELECT * FROM partbot_tiendas WHERE tienda_id = ? AND activo = 'SI' LIMIT 1", [TIENDA_ID]);
-        if (rows.length > 0) {
-            tiendaInfo = rows[0];
-            console.log(`[PARTBOT] Tienda: ${tiendaInfo.nombre}`);
-        } else {
-            console.log("[PARTBOT] ERROR: Tienda no encontrada o inactiva");
+        let usuario = '';
+        const m1 = hostname.match(/partbot[-](.+?)\.onrender\.com/);
+        const m2 = hostname.match(/^partbot[-](.+)$/);
+        const m3 = process.env.RENDER_EXTERNAL_URL ? process.env.RENDER_EXTERNAL_URL.match(/partbot[-](.+?)\.onrender\.com/) : null;
+        const m4 = process.env.RENDER_SERVICE_NAME ? process.env.RENDER_SERVICE_NAME.match(/^partbot[-](.+)$/) : null;
+        const match = m1 || m2 || m3 || m4;
+        if (match) usuario = match[1].toLowerCase();
+
+        if (!usuario && process.env.TIENDA_ID) {
+            TIENDA_ID = parseInt(process.env.TIENDA_ID);
+            console.log(`[PARTBOT] TIENDA_ID desde env: ${TIENDA_ID}`);
         }
-    } catch (e) { console.log("[PARTBOT] Error cargando tienda:", e.message); }
+
+        if (usuario) {
+            console.log(`[PARTBOT] Detectando tienda por nombre: ${usuario}`);
+            const [rows] = await pool.execute("SELECT tienda_id, nombre FROM partbot_tiendas WHERE LOWER(nombre) = ? AND activo = 'SI' LIMIT 1", [usuario]);
+            if (rows.length > 0) {
+                TIENDA_ID = rows[0].tienda_id;
+                const [cl] = await pool.execute("SELECT usuario, cedula FROM `juant200_venezon`.`tab_clientes` WHERE usuario = ? LIMIT 1", [rows[0].nombre]);
+                tiendaInfo = { tienda_id: TIENDA_ID, nombre: rows[0].nombre, usuario: cl.length > 0 ? cl[0].usuario : '', cedula: cl.length > 0 ? cl[0].cedula : '' };
+                console.log(`[PARTBOT] Tienda detectada: ${tiendaInfo.nombre} (ID: ${TIENDA_ID})`);
+                return;
+            }
+        }
+
+        TIENDA_ID = parseInt(process.env.TIENDA_ID) || 161;
+        const [rows] = await pool.execute("SELECT tienda_id, nombre FROM partbot_tiendas WHERE tienda_id = ? AND activo = 'SI' LIMIT 1", [TIENDA_ID]);
+        if (rows.length > 0) {
+            const [cl] = await pool.execute("SELECT usuario, cedula FROM `juant200_venezon`.`tab_clientes` WHERE usuario = ? LIMIT 1", [rows[0].nombre]);
+            tiendaInfo = { tienda_id: TIENDA_ID, nombre: rows[0].nombre, usuario: cl.length > 0 ? cl[0].usuario : '', cedula: cl.length > 0 ? cl[0].cedula : '' };
+            console.log(`[PARTBOT] Tienda: ${tiendaInfo.nombre}`);
+        }
+    } catch (e) { console.log("[PARTBOT] Error detectando tienda:", e.message); TIENDA_ID = parseInt(process.env.TIENDA_ID) || 161; }
+}
+
+async function cargarTienda() {
+    console.log("[PARTBOT] Servidor listo, esperando primer request para detectar tienda...");
+    TIENDA_ID = 0;
 }
 
 async function obtenerTasa(tiendaId) {
@@ -638,6 +671,7 @@ function backBtn() { return `<a href="/" class="btn btn-primary w-100 mt-2" styl
 function notFoundHtml(msg) { return pageWrap('No encontrado', `<div class="alert alert-warning mt-3">${msg}</div>${backBtn()}`); }
 
 const server = http.createServer(async (req, res) => {
+    await detectarTienda(req.headers.host || '');
     const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     const query = Object.fromEntries(parsedUrl.searchParams.entries());
     const pathname = parsedUrl.pathname;
@@ -658,10 +692,10 @@ const server = http.createServer(async (req, res) => {
                 const nombre = pushName || a.telefono;
                 return `<tr><td>${nombre}<br><small class="text-muted">${a.telefono}</small></td><td><small>${itemsHtml || 'Visitó el bot'}</small></td><td><span class="badge bg-secondary">Sin confirmar</span></td><td><small>${new Date(a.ultima_interaccion).toLocaleString()}</small></td><td><a href="/detalle-carrito?tel=${encodeURIComponent(a.telefono)}" class="btn btn-sm btn-outline-primary">Ver detalle</a></td></tr>`;
             }).join('');
-            res.end(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><title>PartBot - ${tiendaInfo?.nombre || 'Tienda'}</title><style>body{background:#f4f7f6;font-family:'Segoe UI',sans-serif}.card{border-radius:12px;border:none;box-shadow:0 2px 8px rgba(0,0,0,0.06)}.table th{font-size:.75rem;text-transform:uppercase;letter-spacing:.3px;color:#888;font-weight:600}.table td{vertical-align:middle}.badge{font-weight:500}.section-title{font-size:.85rem;text-transform:uppercase;letter-spacing:.5px;color:#999;font-weight:600;margin-bottom:12px}.order-item{border-left:3px solid #e94560;padding:8px 12px;margin-bottom:6px;background:#fcfcfc;border-radius:0 8px 8px 0}</style><meta http-equiv="refresh" content="30"></head><body><nav class="navbar navbar-dark mb-3" style="background:linear-gradient(135deg,#1a1a2e,#16213e)"><div class="container"><span class="navbar-brand fw-bold">🚗 PartBot — ${tiendaInfo?.nombre || 'Tienda'}</span><span class="badge ${isBotReady() ? 'bg-success' : 'bg-danger'}">${isBotReady() ? '🟢 Online' : '🔴 Offline'}</span></div></nav><div class="container"><div class="row mb-3 g-2"><div class="col-md-4"><div class="card p-3 text-center"><h3 class="mb-0">📦 ${stats[0].total}</h3><small class="text-muted">Total Pedidos</small></div></div><div class="col-md-4"><div class="card p-3 text-center"><h3 class="mb-0">⏳ ${stats[0].pendientes}</h3><small class="text-muted">Pendientes</small></div></div><div class="col-md-4"><div class="card p-3 text-center"><h3 class="mb-0">🛒 ${abandonados[0].total}</h3><small class="text-muted">Carritos abandonados</small></div></div></div>` +
+            res.end(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><title>PartBot - ${tiendaInfo?.nombre || 'Tienda'}</title><style>body{background:#f4f7f6;font-family:'Segoe UI',sans-serif}.card{border-radius:12px;border:none;box-shadow:0 2px 8px rgba(0,0,0,0.06)}.table th{font-size:.75rem;text-transform:uppercase;letter-spacing:.3px;color:#888;font-weight:600}.table td{vertical-align:middle}.badge{font-weight:500}.section-title{font-size:.85rem;text-transform:uppercase;letter-spacing:.5px;color:#999;font-weight:600;margin-bottom:12px}.order-item{border-left:3px solid #e94560;padding:8px 12px;margin-bottom:6px;background:#fcfcfc;border-radius:0 8px 8px 0}</style><meta http-equiv="refresh" content="30"></head><body><nav class="navbar navbar-dark mb-3" style="background:linear-gradient(135deg,#1a1a2e,#16213e)"><div class="container">${tiendaInfo?.cedula ? `<img src="https://one4cars.com/sevencorpweb/imagen/${tiendaInfo.cedula}.jpg" onerror="this.style.display='none'" style="width:30px;height:30px;border-radius:50%;object-fit:cover;margin-right:8px">` : ''}<span class="navbar-brand fw-bold">🚗 PartBot — ${tiendaInfo?.nombre || 'Tienda'}</span><span class="badge ${isBotReady() ? 'bg-success' : 'bg-danger'}">${isBotReady() ? '🟢 Online' : '🔴 Offline'}</span></div></nav><div class="container"><div class="row mb-3 g-2"><div class="col-md-4"><div class="card p-3 text-center"><h3 class="mb-0">📦 ${stats[0].total}</h3><small class="text-muted">Total Pedidos</small></div></div><div class="col-md-4"><div class="card p-3 text-center"><h3 class="mb-0">⏳ ${stats[0].pendientes}</h3><small class="text-muted">Pendientes</small></div></div><div class="col-md-4"><div class="card p-3 text-center"><h3 class="mb-0">🛒 ${abandonados[0].total}</h3><small class="text-muted">Carritos abandonados</small></div></div></div>` +
             (pendientes.length ? `<div class="card p-3 mb-3"><div class="section-title">📋 Pedidos Pendientes</div><div class="table-responsive"><table class="table table-sm table-hover"><thead><tr><th>#</th><th>Cliente</th><th>Dirección</th><th>Tipo</th><th>Productos</th><th>Estado</th><th>Total</th><th>Fecha</th><th></th></tr></thead><tbody>${filasPend}</tbody></table></div></div>` : `<div class="card p-3 mb-3 text-center text-muted py-4">✅ No hay pedidos pendientes</div>`) +
             (abandonados[0].total > 0 ? `<div class="card p-3 mb-3"><div class="section-title">🛒 Carritos Abandonados (sin confirmar)</div><div class="table-responsive"><table class="table table-sm table-hover"><thead><tr><th>Cliente</th><th>Productos</th><th>Estado</th><th>Última interacción</th><th></th></tr></thead><tbody>${filasAban}</tbody></table></div></div>` : '') +
-            `<div class="card p-3"><div class="d-flex gap-2">${qrCodeData.startsWith('data') ? `<div><img src="${qrCodeData}" style="max-width:130px"><br><small class="text-muted">Escanee el QR</small></div>` : ''}<div><a href="/pedidos" class="btn btn-primary btn-sm">📋 Ver todos los pedidos</a><br class="mb-1"><a href="${isBotReady() ? '/reset-sesion' : '#'}" class="btn btn-outline-danger btn-sm mt-1">${isBotReady() ? '🔄 Nuevo QR' : '🔄 Reconectar'}</a></div></div></div></div></body></html>`);
+            `<div class="card p-3"><div class="d-flex gap-2">${qrCodeData.startsWith('data') ? `<div><img src="${qrCodeData}" style="max-width:130px"><br><small class="text-muted">Escanee el QR</small></div>` : ''}<div><a href="/pedidos" class="btn btn-primary btn-sm">📋 Ver todos los pedidos</a><br class="mb-1"><a href="${isBotReady() ? '/reset-sesion' : '#'}" class="btn btn-outline-danger btn-sm mt-1">${isBotReady() ? '🔄 Nuevo QR' : '🔄 Reconectar'}</a></div></div></div><div class="text-center mt-3 mb-4"><a href="https://one4cars.com/generate_clients.php?zonas=${TIENDA_ID}" class="btn btn-outline-primary btn-sm" target="_blank">📍 Zonas</a> <a href="https://one4cars.com/generate_clients.php?envios=${TIENDA_ID}" class="btn btn-outline-primary btn-sm" target="_blank">🚚 Envíos</a> <a href="https://one4cars.com/generate_clients.php?pagos=${TIENDA_ID}" class="btn btn-outline-primary btn-sm" target="_blank">💳 Pagos</a></div></div></body></html>`);
         } catch (e) { res.end("Error: " + e.message); }
     } else if (pathname === '/detalle-carrito') {
         try {
@@ -710,7 +744,7 @@ const server = http.createServer(async (req, res) => {
         try {
             const [rows] = await pool.execute("SELECT p.*,(SELECT COUNT(*) FROM partbot_pedidos_reng WHERE id_pedido = p.id_pedido) as items FROM partbot_pedidos p WHERE p.tienda_id = ? ORDER BY p.id_pedido DESC LIMIT 50", [TIENDA_ID]);
             const filas = rows.map(p => `<tr><td>#${p.nro_pedido}</td><td>${p.nombres || p.celular}</td><td>$${parseFloat(p.total_general).toFixed(2)}</td><td>${p.tipo_entrega === 'delivery' ? '🚚' : '🏪'}</td><td>${p.zona_delivery || '-'}</td><td>${p.items}</td><td><span class="badge ${p.estado === 'confirmado' ? 'bg-success' : p.estado === 'entregado' ? 'bg-info' : p.estado === 'cancelado' ? 'bg-danger' : 'bg-warning'}">${p.estado}</span></td><td><small>${new Date(p.fecha_reg).toLocaleString()}</small></td><td><a href="/detalle-pedido?id=${p.id_pedido}" class="btn btn-sm btn-outline-primary">Ver</a></td></tr>`).join('');
-            res.end(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><title>Pedidos - PartBot</title><style>body{background:#f4f7f6;font-family:'Segoe UI',sans-serif;font-size:14px}.card{border-radius:12px;border:none;box-shadow:0 2px 8px rgba(0,0,0,0.06)}.table th{font-size:.7rem;text-transform:uppercase;letter-spacing:.3px;color:#888;font-weight:600;white-space:nowrap}.table td{vertical-align:middle;white-space:nowrap}</style></head><body><nav class="navbar navbar-dark mb-3" style="background:linear-gradient(135deg,#1a1a2e,#16213e);padding:8px 0"><div class="container"><a href="/" class="navbar-brand py-0" style="font-size:1rem">🚗 PartBot</a><span class="text-white" style="font-size:.85rem">📋 Pedidos</span></div></nav><div class="container px-3"><div class="card p-2 p-sm-3"><div class="table-responsive"><table class="table table-sm table-hover mb-0"><thead><tr><th>#</th><th>Cliente</th><th>Total</th><th>Tipo</th><th>Zona</th><th>Items</th><th>Estado</th><th>Fecha</th><th></th></tr></thead><tbody>${filas || '<tr><td colspan="9" class="text-center text-muted py-3">Sin pedidos</td></tr>'}</tbody></table></div></div><a href="/" class="btn btn-outline-secondary btn-sm mt-2">← Volver</a></div></body></html>`);
+            res.end(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><title>Pedidos - ${tiendaInfo?.nombre || 'PartBot'}</title><style>body{background:#f4f7f6;font-family:'Segoe UI',sans-serif;font-size:14px}.card{border-radius:12px;border:none;box-shadow:0 2px 8px rgba(0,0,0,0.06)}.table th{font-size:.7rem;text-transform:uppercase;letter-spacing:.3px;color:#888;font-weight:600;white-space:nowrap}.table td{vertical-align:middle;white-space:nowrap}</style></head><body><nav class="navbar navbar-dark mb-3" style="background:linear-gradient(135deg,#1a1a2e,#16213e);padding:8px 0"><div class="container">${tiendaInfo?.cedula ? `<img src="https://one4cars.com/sevencorpweb/imagen/${tiendaInfo.cedula}.jpg" onerror="this.style.display='none'" style="width:28px;height:28px;border-radius:50%;object-fit:cover;margin-right:8px">` : ''}<a href="/" class="navbar-brand py-0" style="font-size:1rem">🚗 PartBot — ${tiendaInfo?.nombre || 'Tienda'}</a><span class="text-white" style="font-size:.85rem">📋 Pedidos</span></div></nav><div class="container px-3"><div class="card p-2 p-sm-3"><div class="table-responsive"><table class="table table-sm table-hover mb-0"><thead><tr><th>#</th><th>Cliente</th><th>Total</th><th>Tipo</th><th>Zona</th><th>Items</th><th>Estado</th><th>Fecha</th><th></th></tr></thead><tbody>${filas || '<tr><td colspan="9" class="text-center text-muted py-3">Sin pedidos</td></tr>'}</tbody></table></div></div><a href="/" class="btn btn-outline-secondary btn-sm mt-2">← Volver</a><div class="float-end mt-2"><a href="https://one4cars.com/generate_clients.php?zonas=${TIENDA_ID}" class="btn btn-outline-primary btn-sm" target="_blank">📍 Zonas</a> <a href="https://one4cars.com/generate_clients.php?envios=${TIENDA_ID}" class="btn btn-outline-primary btn-sm" target="_blank">🚚 Envíos</a> <a href="https://one4cars.com/generate_clients.php?pagos=${TIENDA_ID}" class="btn btn-outline-primary btn-sm" target="_blank">💳 Pagos</a></div></div></body></html>`);
         } catch (e) { res.end("Error: " + e.message); }
     } else if (pathname === '/reset-sesion') {
         try { if (fs.existsSync(AUTH_DIR)) fs.rmSync(AUTH_DIR, { recursive: true, force: true }); await pool.execute("DELETE FROM partbot_auth_store WHERE tienda_id = ?", [TIENDA_ID]); res.writeHead(302, { Location: '/' }); res.end(); setTimeout(() => startBot(), 2000); } catch (e) { res.end("Error: " + e.message); }
